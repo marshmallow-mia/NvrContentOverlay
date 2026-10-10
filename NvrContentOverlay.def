@@ -1,0 +1,8 @@
+LIBRARY NvrContentOverlay
+EXPORTS
+    NvrPluginGetInfo
+    NvrPluginGetApiVersion
+    NvrPluginGetCapabilities
+    NvrPluginInitEx
+    NvrPluginInit
+    NvrPluginShutdown
