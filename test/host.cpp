@@ -8,6 +8,11 @@
 // --hold opens <path> before the init and keeps it open (the game holding its packages);
 // --read prints the first line of what opening <path> for reading gets; --write tries to
 // open it for writing; --shutdown calls NvrPluginShutdown.
+//
+// The plugin's log lines go through StubLog, which prints them on stdout the way nEVR's run log
+// shows them ([NEVR.PLUGIN] plugin=<id> ...). The plugin writes no log file.
+//
+// Built with the nEVR SDK headers: g++ -I<nevr-runtime>/sdk/include (see README.md).
 
 #include <windows.h>
 
@@ -15,12 +20,20 @@
 #include <cstring>
 #include <string>
 
-#include "../nevr_plugin_interface.h"
+#include "nevr/plugin_interface.h"
 
 static std::wstring Wide(const char* s) {
     wchar_t buf[1024];
     MultiByteToWideChar(CP_UTF8, 0, s, -1, buf, 1024);
     return buf;
+}
+
+// nEVR's host log, as the stand-in game gives it to the plugin (ctx->log). After the marker the line is
+// nEVR's shape, "[NEVR.PLUGIN] plugin=<id> <message>"; the leading "STUBLOG <LEVEL> " is this stand-in's own
+// marker (nEVR carries the level as Log()'s level, not in the text), printed so the tests can see the level.
+static void StubLog(const char* plugin_id, uint32_t level, const char* message, const NevrLogField*, uint32_t) {
+    static const char* const names[] = {"DEBUG", "INFO", "WARNING", "ERROR"};
+    printf("STUBLOG %s [NEVR.PLUGIN] plugin=%s %s\n", level < 4 ? names[level] : "?", plugin_id, message);
 }
 
 int main(int argc, char** argv) {
@@ -62,6 +75,8 @@ int main(int argc, char** argv) {
     ctx.base_addr = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     ctx.flags = NEVR_HOST_IS_CLIENT;
     ctx.ctx_size = sizeof(ctx);
+    ctx.plugin_id = "NvrContentOverlay";
+    ctx.log = StubLog;
     printf("init %d\n", init(&ctx, argv[1]));
 
     for (; a < argc; ++a) {

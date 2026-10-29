@@ -65,11 +65,20 @@ plugins:
 |---|---|
 | `active` | the pack to serve (`<root>/content/<active>/`). Absent: nothing to do |
 | `logging` | `verbose`: also log every file the game opens and every module it loads (the first 4000), as a probe |
-| `log_dir` | the log folder, relative to `<root>` (default `plugin_logs/NvrContentOverlay`) |
+
+The plugin writes no log file of its own. Its lines go to nEVR's run log, as
+`[NEVR.PLUGIN] plugin=NvrContentOverlay <message>`. It has no `log_dir` arg. It logs at Warning when it refuses or
+degrades (a refused pack, a failed hook), at Info for the pack it checks and the state it ends in,
+and at Debug for the first 50 opens and scripts it serves (all of them with `logging: verbose`)
+and for each open or module it probes. Its lines reach the host's log when the context the
+host passes carries the log function (its `ctx_size` covers `ctx->log`: plugin API 6 or newer);
+from an older host they go to stderr as `<prefix> <LEVEL> <message>`, which that host does not
+collect. The plugin reports the `NEVR_PLUGIN_API_VERSION` of the SDK headers it is built with (8);
+a host older than that warns and loads it anyway. It is built with `-DNEVR_SDK_INCLUDE=<nevr-runtime>/sdk/include`.
 
 `<root>` is the folder above the `plugins` folder the plugin was loaded from. From nEVR 6.0 on,
-plugins load from nEVR's root, `%LOCALAPPDATA%\nevr\echovr`, so the pack and the log are there and
-nothing is written in the game folder. A nEVR before 6.0 loads plugins from `bin/win10/plugins`,
+plugins load from nEVR's root, `%LOCALAPPDATA%\nevr\echovr`, so the pack is there and nothing is
+written in the game folder. A nEVR before 6.0 loads plugins from `bin/win10/plugins`,
 so `<root>` is `bin/win10`, as in 1.0.0. The game's own files (the stock manifests and packages,
 `bin/win10/scripts`) are still read where the game keeps them.
 
@@ -106,9 +115,10 @@ game folder. `files` lists every file the other keys name.
 ## Build and test
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-toolchain.cmake
+cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-toolchain.cmake \
+      -DNEVR_SDK_INCLUDE=<nevr-runtime>/sdk/include   # required: configure fails without it
 cmake --build build                                     # build/NvrContentOverlay.dll
-x86_64-w64-mingw32-g++ -std=c++17 -O1 -static -o build/host.exe test/host.cpp
+x86_64-w64-mingw32-g++ -std=c++17 -O1 -static -I<nevr-runtime>/sdk/include -o build/host.exe test/host.cpp
 ```
 
 On Windows: `powershell -ExecutionPolicy Bypass -File test\run.ps1 -Dll build\NvrContentOverlay.dll
@@ -116,6 +126,7 @@ On Windows: `powershell -ExecutionPolicy Bypass -File test\run.ps1 -Dll build\Nv
 case: no pack, serving, each refusal above, and shutdown. The script loader hook needs
 the real echovr.exe and is tested in the game.
 
-The ABI is nEVR plugin ABI v5 (`nevr_plugin_interface.h`, as in NvrMissingTextures).
-It is built static with MinHook 1.3.4, pinned by hash, and nlohmann/json (third_party).
+The plugin is built against nEVR's plugin SDK headers (`nevr/plugin_interface.h`, `nevr/plugin_logger.h`,
+from nEVR's `sdk/include`), and reports the API version those headers give. It is built static with
+MinHook 1.3.4, pinned by hash, and nlohmann/json (third_party).
 Capabilities: `ALTERS_GAMEPLAY | HOOKS_ENGINE`.

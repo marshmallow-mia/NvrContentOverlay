@@ -1,7 +1,7 @@
 #!/bin/bash
-# Runs NvrContentOverlay.dll through test/host.exe under Wine (Linux), for where run.ps1 can't run: the pack and log
-# paths in both plugin layouts (bin\win10\plugins before nEVR 6.0, <nevr root>\plugins from 6.0 on). run.ps1 has the
-# full set of refusals.
+# Runs NvrContentOverlay.dll through test/host.exe under Wine (Linux), for where run.ps1 can't run: the pack paths and
+# the plugin's log lines in both plugin layouts (bin\win10\plugins before nEVR 6.0, <nevr root>\plugins from 6.0 on).
+# run.ps1 has the full set of refusals.
 #
 #   test/run-wine.sh build/NvrContentOverlay.dll build/host.exe
 #
@@ -37,10 +37,10 @@ new_game() {
 EOF
 }
 
-# run <host args...>: OUT = what host.exe printed, LOG = the plugin's log under the plugin's root.
+# run <host args...>: OUT = what host.exe printed; the plugin's log lines are in it (host.cpp's StubLog), since the
+# plugin writes no log file.
 run() {
     OUT=$(NCO_TEST_DLL=$(win "$G_HOME/plugins/NvrContentOverlay.dll") WINEPATH= wine "$G_BIN/host.exe" "$@" 2>&1 | tr -d '\r')
-    LOG=$(cat "$G_HOME/plugin_logs/NvrContentOverlay/NvrContentOverlay.log" 2>/dev/null | tr -d '\r')
 }
 
 wineboot -i >/dev/null 2>&1; wineserver -w
@@ -51,7 +51,7 @@ run '{"active":"t"}' --read "$(win "$G_DATA/manifests/$pkg")" --read "$(win "$G_
 check '[[ $OUT == *"init 0"* ]]' 'init succeeds'
 check '[[ $OUT == *"$pkg: PACK-MANIFEST"* ]]' 'the manifest comes from bin\win10\content\t'
 check '[[ $OUT == *"${pkg}_1: PACK-PKG1"* ]]' 'the added package comes from the pack'
-check '[[ $LOG == *"pack '"'"'t'"'"' 1.2.3: 2 files checked"* ]]' 'logs in bin\win10\plugin_logs, as before'
+check '[[ $OUT == *"STUBLOG INFO [NEVR.PLUGIN] plugin=NvrContentOverlay pack '"'"'t'"'"' 1.2.3: 2 files checked"* ]]' 'logs the checked pack through the host'
 
 echo "serving a pack from nEVR's root (6.0 on)"
 new_game root root
@@ -59,7 +59,7 @@ run '{"active":"t"}' --read "$(win "$G_DATA/manifests/$pkg")" --read "$(win "$G_
 check '[[ $OUT == *"init 0"* ]]' 'init succeeds'
 check '[[ $OUT == *"$pkg: PACK-MANIFEST"* ]]' 'the manifest comes from <root>\content\t'
 check '[[ $OUT == *"${pkg}_1: PACK-PKG1"* ]]' 'the added package comes from the pack under the root'
-check '[[ $LOG == *"pack '"'"'t'"'"' 1.2.3: 2 files checked"* ]]' 'logs in <root>\plugin_logs'
+check '[[ $OUT == *"STUBLOG INFO [NEVR.PLUGIN] plugin=NvrContentOverlay pack '"'"'t'"'"' 1.2.3: 2 files checked"* ]]' 'logs the checked pack through the host, under the root'
 check '[ ! -e "$G_BIN/plugin_logs" ] && [ -z "$(find "$G_BIN" -newer "$G_BIN/host.exe" ! -path "$G_BIN")" ]' 'writes nothing in the game folder'
 
 echo "a pack left in the game folder, plugin in nEVR's root"
@@ -67,7 +67,7 @@ new_game rootbin root packinbin
 run '{"active":"t"}' --read "$(win "$G_DATA/manifests/$pkg")"
 check '[[ $OUT == *"init 1"* ]]' 'init fails'
 check '[[ $OUT == *"STOCK-MANIFEST"* ]]' 'the game stays stock'
-check '[[ $LOG == *"no content.json"* ]]' 'logs that the root has no such pack'
+check '[[ $OUT == *"STUBLOG WARNING [NEVR.PLUGIN] plugin=NvrContentOverlay pack '"'"'t'"'"': no content.json"* ]]' 'logs a warning that the root has no such pack'
 
 wineserver -k 2>/dev/null
 echo "$pass passed, $fail failed"

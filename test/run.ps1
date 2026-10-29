@@ -5,7 +5,7 @@
 #
 # host.exe isn't echovr.exe, so the script loader hook can't go in here: a pack with
 # scripts is refused (tested), and the hook itself is tested in the game. Build host.exe with
-#   x86_64-w64-mingw32-g++ -std=c++17 -O1 -static -o build/host.exe test/host.cpp
+#   x86_64-w64-mingw32-g++ -std=c++17 -O1 -static -I<nevr-runtime>/sdk/include -o build/host.exe test/host.cpp
 param([Parameter(Mandatory)][string]$Dll, [Parameter(Mandatory)][string]$HostExe)
 $ErrorActionPreference = 'Stop'
 $Dll = (Resolve-Path $Dll).Path
@@ -22,7 +22,7 @@ function Check($ok, $what) {
 function Sha($path) { (Get-FileHash $path -Algorithm SHA256).Hash.ToLower() }
 
 # A fake install: stock manifest + package _0, and a pack 't' with its manifest and package _1.
-# -NevrRoot: the plugin in <nevr root>\plugins (nEVR 6.0 on), so its pack and log are under that root;
+# -NevrRoot: the plugin in <nevr root>\plugins (nEVR 6.0 on), so its pack is under that root;
 # -PackInBin with it: the pack is left in bin\win10\content, where the plugin no longer looks.
 function New-Game($name, [switch]$Scripts, [switch]$NevrRoot, [switch]$PackInBin) {
     $root = Join-Path $work $name
@@ -62,9 +62,8 @@ function Run($g, [string[]]$hostArgs) {
     $env:NCO_TEST_DLL = $g.dll
     $out = & "$($g.bin)\host.exe" @native 2>&1 | Out-String
     Remove-Item Env:NCO_TEST_DLL
-    $log = "$($g.home)\plugin_logs\NvrContentOverlay\NvrContentOverlay.log"
-    $logText = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
-    return @{ out = $out; log = $logText }
+    # The plugin writes no log file: its lines come through host.exe's StubLog, on the same stdout as the rest.
+    return @{ out = $out; log = $out }
 }
 
 New-Item -ItemType Directory -Force $work | Out-Null
@@ -72,10 +71,10 @@ try {
     "no pack"
     $g = New-Game 'none'
     $r = Run $g @('{}', '--read', "$($g.data)\manifests\$pkg")
-    Check ($r.out -match 'info content_overlay 1\.1\.0 api 5') 'exports its info and ABI v5'
+    Check ($r.out -match 'info content_overlay 1\.2\.0 api 8') 'exports its info and API v8'
     Check ($r.out -match 'init 0') 'init succeeds'
     Check ($r.out -match 'manifests\\48037dc70b0ecab2: STOCK-MANIFEST') 'the game reads the stock manifest'
-    Check ($r.log -match 'nothing to do') 'logs that it has nothing to do'
+    Check ($r.log -match 'STUBLOG INFO \[NEVR\.PLUGIN\] plugin=NvrContentOverlay nothing to do') 'logs through the host that it has nothing to do'
 
     "serving a pack"
     $g = New-Game 'serve'
@@ -90,7 +89,7 @@ try {
     Check ($r.out -match "${pkg}_0: STOCK-PKG0") 'a stock package stays stock'
     Check ($r.out -match "write .*: STOCK-MANIFEST") 'an open for writing is not redirected'
     Check (($lines | Select-Object -Last 3) -match 'read .*: STOCK-MANIFEST') 'after shutdown the stock manifest is back'
-    Check ($r.log -match "pack 't' 1\.2\.3: 2 files checked") 'logs the checked pack'
+    Check ($r.log -match "STUBLOG INFO \[NEVR\.PLUGIN\] plugin=NvrContentOverlay pack 't' 1\.2\.3: 2 files checked") 'logs the checked pack'
 
     "serving a pack from nEVR's root (6.0 on)"
     $g = New-Game 'root' -NevrRoot
@@ -98,7 +97,7 @@ try {
     Check ($r.out -match 'init 0') 'init succeeds'
     Check ($r.out -match 'manifests.48037dc70b0ecab2: PACK-MANIFEST') 'the manifest comes from the pack under the root'
     Check ($r.out -match "${pkg}_1: PACK-PKG1") 'the added package comes from the pack under the root'
-    Check ($r.log -match "pack 't' 1\.2\.3: 2 files checked") 'logs under the root'
+    Check ($r.log -match "STUBLOG INFO \[NEVR\.PLUGIN\] plugin=NvrContentOverlay pack 't' 1\.2\.3: 2 files checked") 'logs the checked pack through the host, under the root'
     Check (-not (Test-Path "$($g.bin)\plugin_logs")) 'writes nothing in the game folder'
 
     "a pack left in the game folder, plugin in nEVR's root"
@@ -106,7 +105,7 @@ try {
     $r = Run $g @('{"active":"t"}', '--read', "$($g.data)\manifests\$pkg")
     Check ($r.out -match 'init 1') 'init fails'
     Check ($r.out -match 'STOCK-MANIFEST') 'the game stays stock'
-    Check ($r.log -match 'no content.json') 'logs that the root has no such pack'
+    Check ($r.log -match 'STUBLOG WARNING \[NEVR\.PLUGIN\] plugin=NvrContentOverlay pack .t.: no content.json') 'logs a warning that the root has no such pack'
 
     "stock manifest not the one the pack was built from"
     $g = New-Game 'stock-changed'
@@ -114,14 +113,14 @@ try {
     $r = Run $g @('{"active":"t"}', '--read', "$($g.data)\manifests\$pkg")
     Check ($r.out -match 'init 1') 'init fails'
     Check ($r.out -match 'SOMEONE-REPACKED') 'the game keeps its own manifest'
-    Check ($r.log -match 'not stock') 'logs that the manifest is not stock'
+    Check ($r.log -match 'STUBLOG WARNING \[NEVR\.PLUGIN\] plugin=NvrContentOverlay pack .t.: the game.s manifest \S+ is not stock') 'logs that the manifest is not stock'
 
     "a pack file changed"
     $g = New-Game 'pack-changed'
     [IO.File]::WriteAllText("$($g.pack)\packages\${pkg}_1", "TAMPERED`n")
     $r = Run $g @('{"active":"t"}')
     Check ($r.out -match 'init 1') 'init fails'
-    Check ($r.log -match 'changed') 'logs the changed file'
+    Check ($r.log -match 'STUBLOG WARNING \[NEVR\.PLUGIN\] plugin=NvrContentOverlay pack .t.: \S+ is changed') 'logs the changed file'
 
     "a path climbing out of the pack"
     $g = New-Game 'bad-path'
@@ -129,7 +128,7 @@ try {
     [IO.File]::WriteAllText("$($g.pack)\content.json", ($j -replace '"packages/48037dc70b0ecab2_1"\s*:', '"../packages/48037dc70b0ecab2_1":'))
     $r = Run $g @('{"active":"t"}')
     Check ($r.out -match 'init 1') 'init fails'
-    Check ($r.log -match 'bad file entry') 'logs the bad entry'
+    Check ($r.log -match 'STUBLOG WARNING \[NEVR\.PLUGIN\] plugin=NvrContentOverlay pack .t.: bad file entry') 'logs the bad entry'
 
     "a package below the stock count"
     $g = New-Game 'low-package'
@@ -140,7 +139,7 @@ try {
     [IO.File]::WriteAllText("$($g.pack)\content.json", ($j | ConvertTo-Json -Depth 5))
     $r = Run $g @('{"active":"t"}')
     Check ($r.out -match 'init 1') 'init fails'
-    Check ($r.log -match "isn't one of") 'logs that it would shadow a stock package'
+    Check ($r.log -match "STUBLOG WARNING \[NEVR\.PLUGIN\] plugin=NvrContentOverlay pack .t.: '[^']+' isn't one of") 'logs that it would shadow a stock package'
 
     "an id that is not a plain name"
     $g = New-Game 'bad-id'
@@ -153,13 +152,13 @@ try {
     Check ($r.out -match 'hold ok') 'the stand-in game holds its package'
     Check ($r.out -match 'init 1') 'init fails'
     Check ($r.out -match 'STOCK-MANIFEST') 'the game stays stock'
-    Check ($r.log -match 'loaded too late') 'logs that it came too late'
+    Check ($r.log -match 'STUBLOG WARNING \[NEVR\.PLUGIN\] plugin=NvrContentOverlay loaded too late') 'logs that it came too late'
 
     "scripts on another exe"
     $g = New-Game 'scripts' -Scripts
     $r = Run $g @('{"active":"t"}')
     Check ($r.out -match 'init 1') 'init fails (the script loader is only known in echovr.exe 631547)'
-    Check ($r.log -match "isn't the build") 'logs why'
+    Check ($r.log -match "STUBLOG WARNING \[NEVR\.PLUGIN\] plugin=NvrContentOverlay the pack has scripts, but this isn't the build") 'logs why'
 } finally {
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }
