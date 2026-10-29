@@ -22,16 +22,19 @@ function Check($ok, $what) {
 function Sha($path) { (Get-FileHash $path -Algorithm SHA256).Hash.ToLower() }
 
 # A fake install: stock manifest + package _0, and a pack 't' with its manifest and package _1.
-function New-Game($name, [switch]$Scripts) {
+# -NevrRoot: the plugin in <nevr root>\plugins (nEVR 6.0 on), so its pack and log are under that root;
+# -PackInBin with it: the pack is left in bin\win10\content, where the plugin no longer looks.
+function New-Game($name, [switch]$Scripts, [switch]$NevrRoot, [switch]$PackInBin) {
     $root = Join-Path $work $name
     $bin = "$root\bin\win10"
     $data = "$root\_data\5932408047\rad15\win10"
-    $pack = "$bin\content\t"
-    foreach ($d in "$bin\plugins", "$data\manifests", "$data\packages", "$pack\manifests", "$pack\packages", "$pack\scripts") {
+    $home_ = if ($NevrRoot) { "$root\nevr\echovr" } else { $bin }
+    $pack = if ($PackInBin) { "$bin\content\t" } else { "$home_\content\t" }
+    foreach ($d in "$home_\plugins", "$data\manifests", "$data\packages", "$pack\manifests", "$pack\packages", "$pack\scripts") {
         New-Item -ItemType Directory -Force $d | Out-Null
     }
     Copy-Item $HostExe "$bin\host.exe"
-    Copy-Item $Dll "$bin\plugins\NvrContentOverlay.dll"
+    Copy-Item $Dll "$home_\plugins\NvrContentOverlay.dll"
     [IO.File]::WriteAllText("$data\manifests\$pkg", "STOCK-MANIFEST`n")
     [IO.File]::WriteAllText("$data\packages\${pkg}_0", "STOCK-PKG0`n")
     [IO.File]::WriteAllText("$pack\manifests\$pkg", "PACK-MANIFEST`n")
@@ -50,14 +53,16 @@ function New-Game($name, [switch]$Scripts) {
         scripts = $scriptList; files = $files
     }
     [IO.File]::WriteAllText("$pack\content.json", ($json | ConvertTo-Json -Depth 5))
-    return @{ root = $root; bin = $bin; data = $data; pack = $pack }
+    return @{ root = $root; bin = $bin; data = $data; pack = $pack; home = $home_; dll = "$home_\plugins\NvrContentOverlay.dll" }
 }
 
 function Run($g, [string[]]$hostArgs) {
     # Windows PowerShell drops the double quotes inside native arguments: escape them.
     $native = @($hostArgs | ForEach-Object { $_ -replace '"', '\"' })
+    $env:NCO_TEST_DLL = $g.dll
     $out = & "$($g.bin)\host.exe" @native 2>&1 | Out-String
-    $log = "$($g.bin)\plugin_logs\NvrContentOverlay\NvrContentOverlay.log"
+    Remove-Item Env:NCO_TEST_DLL
+    $log = "$($g.home)\plugin_logs\NvrContentOverlay\NvrContentOverlay.log"
     $logText = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
     return @{ out = $out; log = $logText }
 }
@@ -67,7 +72,7 @@ try {
     "no pack"
     $g = New-Game 'none'
     $r = Run $g @('{}', '--read', "$($g.data)\manifests\$pkg")
-    Check ($r.out -match 'info content_overlay 1\.0\.0 api 5') 'exports its info and ABI v5'
+    Check ($r.out -match 'info content_overlay 1\.1\.0 api 5') 'exports its info and ABI v5'
     Check ($r.out -match 'init 0') 'init succeeds'
     Check ($r.out -match 'manifests\\48037dc70b0ecab2: STOCK-MANIFEST') 'the game reads the stock manifest'
     Check ($r.log -match 'nothing to do') 'logs that it has nothing to do'
@@ -86,6 +91,22 @@ try {
     Check ($r.out -match "write .*: STOCK-MANIFEST") 'an open for writing is not redirected'
     Check (($lines | Select-Object -Last 3) -match 'read .*: STOCK-MANIFEST') 'after shutdown the stock manifest is back'
     Check ($r.log -match "pack 't' 1\.2\.3: 2 files checked") 'logs the checked pack'
+
+    "serving a pack from nEVR's root (6.0 on)"
+    $g = New-Game 'root' -NevrRoot
+    $r = Run $g @('{"active":"t"}', '--read', "$($g.data)\manifests\$pkg", '--read', "$($g.data)\packages\${pkg}_1")
+    Check ($r.out -match 'init 0') 'init succeeds'
+    Check ($r.out -match 'manifests.48037dc70b0ecab2: PACK-MANIFEST') 'the manifest comes from the pack under the root'
+    Check ($r.out -match "${pkg}_1: PACK-PKG1") 'the added package comes from the pack under the root'
+    Check ($r.log -match "pack 't' 1\.2\.3: 2 files checked") 'logs under the root'
+    Check (-not (Test-Path "$($g.bin)\plugin_logs")) 'writes nothing in the game folder'
+
+    "a pack left in the game folder, plugin in nEVR's root"
+    $g = New-Game 'rootbin' -NevrRoot -PackInBin
+    $r = Run $g @('{"active":"t"}', '--read', "$($g.data)\manifests\$pkg")
+    Check ($r.out -match 'init 1') 'init fails'
+    Check ($r.out -match 'STOCK-MANIFEST') 'the game stays stock'
+    Check ($r.log -match 'no content.json') 'logs that the root has no such pack'
 
     "stock manifest not the one the pack was built from"
     $g = New-Game 'stock-changed'

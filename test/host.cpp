@@ -1,6 +1,7 @@
 // A stand-in for the game: loads NvrContentOverlay.dll the way nEVR does, inits it with the
 // given args, then opens files and prints what it got. test/run.ps1 lays out a fake install
-// around it (this exe in bin\win10, the plugin in bin\win10\plugins) and checks the output.
+// around it (this exe in bin\win10, the plugin in bin\win10\plugins, or in NCO_TEST_DLL's path
+// for nEVR's root layout) and checks the output.
 //
 //   host.exe <args json> [--hold <path>] (--read <path> | --write <path> | --shutdown)...
 //
@@ -28,8 +29,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     wchar_t dll[MAX_PATH];
-    GetModuleFileNameW(nullptr, dll, MAX_PATH);
-    wcscpy(wcsrchr(dll, L'\\') + 1, L"plugins\\NvrContentOverlay.dll");
+    if (!GetEnvironmentVariableW(L"NCO_TEST_DLL", dll, MAX_PATH)) {
+        GetModuleFileNameW(nullptr, dll, MAX_PATH);
+        wcscpy(wcsrchr(dll, L'\\') + 1, L"plugins\\NvrContentOverlay.dll");
+    }
     HMODULE m = LoadLibraryExW(dll, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!m) {
         printf("load failed %lu\n", GetLastError());

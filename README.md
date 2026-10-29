@@ -11,7 +11,7 @@ already loads, in place, at its size or smaller. The first pack is EchoCombat
 
 ## What it does
 
-With `{"active": "<id>"}` it reads `bin/win10/content/<id>/content.json`, checks the pack
+With `{"active": "<id>"}` it reads `<root>/content/<id>/content.json`, checks the pack
 and the stock files, then:
 
 | The game opens | It gets |
@@ -63,9 +63,15 @@ plugins:
 
 | Arg | |
 |---|---|
-| `active` | the pack to serve (`bin/win10/content/<active>/`). Absent: nothing to do |
+| `active` | the pack to serve (`<root>/content/<active>/`). Absent: nothing to do |
 | `logging` | `verbose`: also log every file the game opens and every module it loads (the first 4000), as a probe |
-| `log_dir` | the log folder, relative to `bin/win10` (default `plugin_logs/NvrContentOverlay`) |
+| `log_dir` | the log folder, relative to `<root>` (default `plugin_logs/NvrContentOverlay`) |
+
+`<root>` is the folder above the `plugins` folder the plugin was loaded from. From nEVR 6.0 on,
+plugins load from nEVR's root, `%LOCALAPPDATA%\nevr\echovr`, so the pack and the log are there and
+nothing is written in the game folder. A nEVR before 6.0 loads plugins from `bin/win10/plugins`,
+so `<root>` is `bin/win10`, as in 1.0.0. The game's own files (the stock manifests and packages,
+`bin/win10/scripts`) are still read where the game keeps them.
 
 One pack is served at a time. Stacking packs would need their manifests merged; nothing
 does that yet.

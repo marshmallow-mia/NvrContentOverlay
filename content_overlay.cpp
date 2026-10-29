@@ -2,10 +2,13 @@
  * NvrContentOverlay.dll -- serves a content pack's game data in place of the stock files,
  * without changing any game file.
  *
- * A content pack is a folder bin\win10\content\<id>\ that a mod's build makes: the manifests it
+ * A content pack is a folder <root>\content\<id>\ that a mod's build makes: the manifests it
  * changes (the stock ones with its resources added), the extra packages those name, and the
  * script DLLs it replaces or adds. content.json lists every file with its sha256, and the sha256
- * of each stock manifest the pack was built from.
+ * of each stock manifest the pack was built from. <root> is the folder above the one this DLL was
+ * loaded from: nEVR's root (%LOCALAPPDATA%\nevr\echovr) for a nEVR that loads plugins from
+ * <root>\plugins (6.0 on), bin\win10 for one that loads them from bin\win10\plugins. Nothing is
+ * read from or written to the game folder but the game's own files.
  *
  * With the arg "active": "<id>" the plugin checks the pack and the stock manifests, then
  *   - an open of <data dir>\manifests\<pkg> gets the pack's manifest,
@@ -60,7 +63,7 @@ void* g_targetLoad = nullptr;
 FILE* g_log = nullptr;
 std::mutex g_logLock;
 bool g_verbose = false;
-std::wstring g_logDir;  // from the "log_dir" arg; default plugin_logs\NvrContentOverlay
+std::wstring g_logDir;  // from the "log_dir" arg; default <root>\plugin_logs\NvrContentOverlay
 
 // Filled before the hooks go in and only read afterwards.
 bool g_active = false;
@@ -107,6 +110,25 @@ std::wstring ExeDir() {
     return path;
 }
 
+/* The folder above the "plugins" folder this DLL was loaded from: nEVR's root from 6.0 on, bin\win10
+ * before. A DLL loaded from anywhere else (a test host) gets the exe's folder, as before. */
+std::wstring PluginRoot() {
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&PluginRoot), &self))
+        return ExeDir();
+    wchar_t path[MAX_PATH];
+    DWORD n = GetModuleFileNameW(self, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return ExeDir();
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (!slash) return ExeDir();
+    *slash = 0;
+    slash = wcsrchr(path, L'\\');
+    if (!slash || _wcsicmp(slash + 1, L"plugins") != 0) return ExeDir();
+    *slash = 0;
+    return path;
+}
+
 std::wstring Widen(const std::string& s) {
     if (s.empty()) return L"";
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -137,12 +159,12 @@ std::wstring Canonical(const std::wstring& path) {
     return out;
 }
 
-/* <exe dir>\plugin_logs\NvrContentOverlay\NvrContentOverlay.log unless "log_dir" says otherwise
- * (relative to the exe's folder), where the other plugins log. */
+/* <root>\plugin_logs\NvrContentOverlay\NvrContentOverlay.log unless "log_dir" says otherwise
+ * (relative to <root>). */
 void OpenLog() {
-    std::wstring exe = ExeDir();
-    std::wstring dir = g_logDir.empty() ? exe + L"\\plugin_logs\\NvrContentOverlay"
-                                        : (g_logDir.size() > 1 && g_logDir[1] == L':' ? g_logDir : exe + L"\\" + g_logDir);
+    std::wstring base = PluginRoot();
+    std::wstring dir = g_logDir.empty() ? base + L"\\plugin_logs\\NvrContentOverlay"
+                                        : (g_logDir.size() > 1 && g_logDir[1] == L':' ? g_logDir : base + L"\\" + g_logDir);
     for (size_t at = dir.find(L'\\', 3); at != std::wstring::npos; at = dir.find(L'\\', at + 1))
         CreateDirectoryW(dir.substr(0, at).c_str(), nullptr);
     CreateDirectoryW(dir.c_str(), nullptr);
@@ -231,7 +253,7 @@ std::wstring PackFile(const std::wstring& dir, const std::string& rel) {
     return out;
 }
 
-/* Reads and checks bin\win10\content\<id>\content.json, the pack's files and the stock manifests.
+/* Reads and checks <root>\content\<id>\content.json, the pack's files and the stock manifests.
  * Fills g_files and g_scripts; false (with the reason logged) leaves both empty. */
 bool LoadPack(const std::string& id) {
     if (!IsSafeId(id)) {
@@ -239,7 +261,7 @@ bool LoadPack(const std::string& id) {
         return false;
     }
     const std::wstring exe = ExeDir();
-    const std::wstring dir = exe + L"\\content\\" + Widen(id);
+    const std::wstring dir = PluginRoot() + L"\\content\\" + Widen(id);
     const std::wstring root = exe + L"\\..\\..";
 
     json pack;
@@ -556,7 +578,7 @@ int Install(const char* argsJson) {
         g_start = ((static_cast<ULONGLONG>(created.dwHighDateTime) << 32) | created.dwLowDateTime) / 10000;
     Args args = ParseArgs(argsJson);
     OpenLog();
-    Log("NvrContentOverlay 1.0.0, %s", args.active.empty() ? "no active pack" : args.active.c_str());
+    Log("NvrContentOverlay 1.1.0, %s", args.active.empty() ? "no active pack" : args.active.c_str());
 
     const bool live = ExeTimestamp() == kLiveBuild;
     uint8_t* load = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + kLoadModuleRva;
@@ -621,7 +643,7 @@ NvrPluginInfo NvrPluginGetInfo(void) {
     info.name = "content_overlay";
     info.description = "Serves a content pack's game data in place of the stock files";
     info.version_major = 1;
-    info.version_minor = 0;
+    info.version_minor = 1;
     info.version_patch = 0;
     return info;
 }
