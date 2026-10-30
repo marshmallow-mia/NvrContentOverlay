@@ -24,22 +24,24 @@
 #include <bcrypt.h>
 #include <MinHook.h>
 
-#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
 #include <map>
-#include <mutex>
 #include <string>
 #include <vector>
 
-#include "nevr_plugin_interface.h"
+#include "nevr/plugin_interface.h"
+#include "nevr/plugin_logger.h"
 #include "nlohmann/json.hpp"
 
 namespace {
 
 using json = nlohmann::json;
+
+// Lines go to nEVR's run log as [NEVR.PLUGIN] plugin=NvrContentOverlay <message> (Rule 15 of nEVR's logging standard).
+NEVR_DEFINE_PLUGIN_LOG("[NvrContentOverlay]")
 
 // echovr.exe 631547 (rad15_live), and its module loader:
 //   void* LoadModule(const char* path, void* arg, int call_main, int reuse_loaded)
@@ -60,10 +62,7 @@ void* g_targetW = nullptr;
 void* g_targetA = nullptr;
 void* g_targetLoad = nullptr;
 
-FILE* g_log = nullptr;
-std::mutex g_logLock;
 bool g_verbose = false;
-std::wstring g_logDir;  // from the "log_dir" arg; default <root>\plugin_logs\NvrContentOverlay
 
 // Filled before the hooks go in and only read afterwards.
 bool g_active = false;
@@ -77,29 +76,6 @@ volatile LONG g_logged = 0;
 constexpr LONG kVerboseLines = 4000;
 
 thread_local bool t_inHook = false;
-
-ULONGLONG g_start = 0;  // process creation, in ms
-
-ULONGLONG NowMs() {
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    return ((static_cast<ULONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000;
-}
-
-void Log(const char* fmt, ...) {
-    std::lock_guard<std::mutex> lock(g_logLock);
-    if (!g_log) return;
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    fprintf(g_log, "[%02u:%02u:%02u +%llums] ", t.wHour, t.wMinute, t.wSecond,
-            static_cast<unsigned long long>(NowMs() - g_start));
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(g_log, fmt, ap);
-    va_end(ap);
-    fputc('\n', g_log);
-    fflush(g_log);
-}
 
 std::wstring ExeDir() {
     wchar_t path[MAX_PATH];
@@ -157,18 +133,6 @@ std::wstring Canonical(const std::wstring& path) {
     std::wstring out = (n == 0 || n >= MAX_PATH * 2) ? in : std::wstring(buf, n);
     if (!out.empty()) CharLowerBuffW(&out[0], static_cast<DWORD>(out.size()));
     return out;
-}
-
-/* <root>\plugin_logs\NvrContentOverlay\NvrContentOverlay.log unless "log_dir" says otherwise
- * (relative to <root>). */
-void OpenLog() {
-    std::wstring base = PluginRoot();
-    std::wstring dir = g_logDir.empty() ? base + L"\\plugin_logs\\NvrContentOverlay"
-                                        : (g_logDir.size() > 1 && g_logDir[1] == L':' ? g_logDir : base + L"\\" + g_logDir);
-    for (size_t at = dir.find(L'\\', 3); at != std::wstring::npos; at = dir.find(L'\\', at + 1))
-        CreateDirectoryW(dir.substr(0, at).c_str(), nullptr);
-    CreateDirectoryW(dir.c_str(), nullptr);
-    g_log = _wfopen((dir + L"\\NvrContentOverlay.log").c_str(), L"w");
 }
 
 DWORD ExeTimestamp() {
@@ -257,7 +221,7 @@ std::wstring PackFile(const std::wstring& dir, const std::string& rel) {
  * Fills g_files and g_scripts; false (with the reason logged) leaves both empty. */
 bool LoadPack(const std::string& id) {
     if (!IsSafeId(id)) {
-        Log("pack '%s': not a valid id", id.c_str());
+        PluginLogWarning("pack '%s': not a valid id", id.c_str());
         return false;
     }
     const std::wstring exe = ExeDir();
@@ -268,7 +232,7 @@ bool LoadPack(const std::string& id) {
     {
         FILE* f = _wfopen((dir + L"\\content.json").c_str(), L"rb");
         if (!f) {
-            Log("pack '%s': no content.json in %s", id.c_str(), Narrow(dir).c_str());
+            PluginLogWarning("pack '%s': no content.json in %s", id.c_str(), Narrow(dir).c_str());
             return false;
         }
         std::string text;
@@ -283,7 +247,7 @@ bool LoadPack(const std::string& id) {
         return it != o.end() && it->is_string() ? it->get<std::string>() : std::string();
     };
     if (!pack.is_object() || pack.value("format", 0) != 1 || str(pack, "id") != id) {
-        Log("pack '%s': content.json isn't a format 1 pack with this id", id.c_str());
+        PluginLogWarning("pack '%s': content.json isn't a format 1 pack with this id", id.c_str());
         return false;
     }
 
@@ -291,19 +255,19 @@ bool LoadPack(const std::string& id) {
     std::map<std::string, std::string> files;
     auto fit = pack.find("files");
     if (fit == pack.end() || !fit->is_object()) {
-        Log("pack '%s': content.json lists no files", id.c_str());
+        PluginLogWarning("pack '%s': content.json lists no files", id.c_str());
         return false;
     }
     for (auto& [rel, sha] : fit->items()) {
         std::string want = sha.is_string() ? sha.get<std::string>() : std::string();
         for (char& c : want) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
         if (!IsPackPath(rel) || !IsHex(want, 64)) {
-            Log("pack '%s': bad file entry '%s'", id.c_str(), rel.c_str());
+            PluginLogWarning("pack '%s': bad file entry '%s'", id.c_str(), rel.c_str());
             return false;
         }
         std::string got = Sha256(PackFile(dir, rel));
         if (got != want) {
-            Log("pack '%s': %s is %s (sha256 %s, want %s)", id.c_str(), rel.c_str(),
+            PluginLogWarning("pack '%s': %s is %s (sha256 %s, want %s)", id.c_str(), rel.c_str(),
                 got.empty() ? "missing" : "changed", got.c_str(), want.c_str());
             return false;
         }
@@ -312,7 +276,7 @@ bool LoadPack(const std::string& id) {
 
     std::string dataRel = str(pack, "data_dir");
     if (!IsPackPath(dataRel)) {
-        Log("pack '%s': bad data_dir '%s'", id.c_str(), dataRel.c_str());
+        PluginLogWarning("pack '%s': bad data_dir '%s'", id.c_str(), dataRel.c_str());
         return false;
     }
     const std::wstring data = PackFile(root, dataRel);
@@ -320,7 +284,7 @@ bool LoadPack(const std::string& id) {
     std::map<std::wstring, std::wstring> mapped;
     auto mit = pack.find("manifests");
     if (mit == pack.end() || !mit->is_array()) {
-        Log("pack '%s': content.json has no manifests", id.c_str());
+        PluginLogWarning("pack '%s': content.json has no manifests", id.c_str());
         return false;
     }
     for (const json& m : *mit) {
@@ -329,13 +293,13 @@ bool LoadPack(const std::string& id) {
         std::string file = m.is_object() ? str(m, "file") : std::string();
         int count = m.is_object() ? m.value("stock_packages", 0) : 0;
         if (!IsHex(pkg, 16) || !IsHex(stock, 64) || count < 1 || !files.count(file)) {
-            Log("pack '%s': bad manifest entry for '%s'", id.c_str(), pkg.c_str());
+            PluginLogWarning("pack '%s': bad manifest entry for '%s'", id.c_str(), pkg.c_str());
             return false;
         }
         const std::wstring stockPath = data + L"\\manifests\\" + Widen(pkg);
         std::string got = Sha256(stockPath);
         if (got != stock) {
-            Log("pack '%s': the game's manifest %s is %s (sha256 %s), the pack was built from %s: "
+            PluginLogWarning("pack '%s': the game's manifest %s is %s (sha256 %s), the pack was built from %s: "
                 "not serving it (restore the stock game files)",
                 id.c_str(), pkg.c_str(), got.empty() ? "missing" : "not stock", got.c_str(), stock.c_str());
             return false;
@@ -344,7 +308,7 @@ bool LoadPack(const std::string& id) {
         g_firstPackages.push_back(data + L"\\packages\\" + Widen(pkg) + L"_0");
         auto pit = m.find("packages");
         if (pit != m.end() && !pit->is_array()) {
-            Log("pack '%s': packages of %s isn't a list", id.c_str(), pkg.c_str());
+            PluginLogWarning("pack '%s': packages of %s isn't a list", id.c_str(), pkg.c_str());
             return false;
         }
         if (pit != m.end()) {
@@ -355,7 +319,7 @@ bool LoadPack(const std::string& id) {
                             name[pkg.size()] == '_';
                 int n = ours ? atoi(name.c_str() + pkg.size() + 1) : -1;
                 if (!ours || n < count || std::to_string(n) != name.substr(pkg.size() + 1)) {
-                    Log("pack '%s': '%s' isn't one of %s's added packages (from _%d on)", id.c_str(), rel.c_str(),
+                    PluginLogWarning("pack '%s': '%s' isn't one of %s's added packages (from _%d on)", id.c_str(), rel.c_str(),
                         pkg.c_str(), count);
                     return false;
                 }
@@ -367,7 +331,7 @@ bool LoadPack(const std::string& id) {
     std::map<std::string, std::string> scripts;
     auto sit = pack.find("scripts");
     if (sit != pack.end() && !sit->is_array()) {
-        Log("pack '%s': scripts isn't a list", id.c_str());
+        PluginLogWarning("pack '%s': scripts isn't a list", id.c_str());
         return false;
     }
     if (sit != pack.end() && !sit->empty()) {
@@ -383,7 +347,7 @@ bool LoadPack(const std::string& id) {
             n = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, wdir.c_str(), -1, nullptr, 0, nullptr, &lossy);
         }
         if (lossy || n <= 0) {
-            Log("pack '%s': its folder has no ANSI path for the game's script loader", id.c_str());
+            PluginLogWarning("pack '%s': its folder has no ANSI path for the game's script loader", id.c_str());
             return false;
         }
         std::string adir(n - 1, '\0');
@@ -394,7 +358,7 @@ bool LoadPack(const std::string& id) {
             bool ok = files.count(rel) && rel == "scripts/" + name && name.size() == 20 &&
                       IsHex(name.substr(0, 16), 16) && name.compare(16, 4, ".dll") == 0;
             if (!ok) {
-                Log("pack '%s': '%s' isn't a script (scripts/<16 hex>.dll)", id.c_str(), rel.c_str());
+                PluginLogWarning("pack '%s': '%s' isn't a script (scripts/<16 hex>.dll)", id.c_str(), rel.c_str());
                 return false;
             }
             scripts[name] = adir + "\\scripts\\" + name;
@@ -403,7 +367,7 @@ bool LoadPack(const std::string& id) {
 
     g_files.swap(mapped);
     g_scripts.swap(scripts);
-    Log("pack '%s' %s: %zu files checked, %zu stock files served from the pack, %zu scripts", id.c_str(),
+    PluginLog("pack '%s' %s: %zu files checked, %zu stock files served from the pack, %zu scripts", id.c_str(),
         str(pack, "version").c_str(), files.size(), g_files.size(), g_scripts.size());
     return true;
 }
@@ -443,14 +407,16 @@ HANDLE OpenW(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, 
         h = g_trueW(pack->c_str(), access, share, sa, disposition, flags, tmpl);
         DWORD err = GetLastError();
         LONG n = InterlockedIncrement(&g_fileHits);
-        if (h == INVALID_HANDLE_VALUE || n <= 50 || g_verbose)
-            Log("%s %ls -> %ls%s", via, name, pack->c_str(), h == INVALID_HANDLE_VALUE ? " FAILED" : "");
+        if (h == INVALID_HANDLE_VALUE)
+            PluginLogWarning("%s %ls -> %ls FAILED", via, name, pack->c_str());
+        else if (n <= 50 || g_verbose)
+            PluginLogDebug("%s %ls -> %ls", via, name, pack->c_str());
         SetLastError(err);
     } else {
         h = g_trueW(name, access, share, sa, disposition, flags, tmpl);
         if (g_verbose && InterlockedIncrement(&g_logged) <= kVerboseLines) {
             DWORD err = GetLastError();
-            Log("%s %ls (access %08lx, disposition %lu)%s", via, name, access, disposition,
+            PluginLogDebug("%s %ls (access %08lx, disposition %lu)%s", via, name, access, disposition,
                 h == INVALID_HANDLE_VALUE ? " not opened" : "");
             SetLastError(err);
         }
@@ -492,11 +458,26 @@ void* __fastcall LoadModuleHook(const char* path, void* arg, int callMain, int r
     if (path) {
         if (const std::string* pack = ScriptFor(path)) {
             void* h = g_trueLoad(pack->c_str(), arg, callMain, reuse);
+            DWORD err = GetLastError();
             LONG n = InterlockedIncrement(&g_scriptHits);
-            if (!h || n <= 50 || g_verbose) Log("script %s -> %s%s", path, pack->c_str(), h ? "" : " FAILED");
+            bool wasInHook = t_inHook;  // the log call's own file opens pass straight through OpenW
+            t_inHook = true;
+            if (!h)
+                PluginLogWarning("script %s -> %s FAILED", path, pack->c_str());
+            else if (n <= 50 || g_verbose)
+                PluginLogDebug("script %s -> %s", path, pack->c_str());
+            t_inHook = wasInHook;
+            SetLastError(err);
             return h;
         }
-        if (g_verbose && InterlockedIncrement(&g_logged) <= kVerboseLines) Log("module %s", path);
+        if (g_verbose && InterlockedIncrement(&g_logged) <= kVerboseLines) {
+            DWORD saved = GetLastError();
+            bool wasInHook = t_inHook;
+            t_inHook = true;
+            PluginLogDebug("module %s", path);
+            t_inHook = wasInHook;
+            SetLastError(saved);
+        }
     }
     return g_trueLoad(path, arg, callMain, reuse);
 }
@@ -505,7 +486,7 @@ bool Hook(void* target, void* detour, void** original, void** slot, const char* 
     MH_STATUS s = MH_CreateHook(target, detour, original);
     if (s == MH_OK) s = MH_EnableHook(target);
     if (s != MH_OK) {
-        Log("ERROR: hooking %s: %s", what, MH_StatusToString(s));
+        PluginLogWarning("hooking %s: %s", what, MH_StatusToString(s));
         MH_RemoveHook(target);
         return false;
     }
@@ -517,7 +498,7 @@ bool HookKernel32(const char* function, void* detour, void** original, void** sl
     HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
     void* t = kernel32 ? reinterpret_cast<void*>(GetProcAddress(kernel32, function)) : nullptr;
     if (!t) {
-        Log("ERROR: kernel32!%s not found", function);
+        PluginLogWarning("kernel32!%s not found", function);
         return false;
     }
     return Hook(t, detour, original, slot, function);
@@ -540,9 +521,9 @@ void LogManifestState() {
     DWORD err = GetLastError();
     if (h != INVALID_HANDLE_VALUE) {
         CloseHandle(h);
-        Log("probe: the main manifest isn't held open at init");
+        PluginLogDebug("probe: the main manifest isn't held open at init");
     } else {
-        Log("probe: the main manifest can't be opened alone at init (error %lu%s)", err,
+        PluginLogDebug("probe: the main manifest can't be opened alone at init (error %lu%s)", err,
             err == ERROR_SHARING_VIOLATION ? ": the game holds it open" : "");
     }
 }
@@ -565,7 +546,6 @@ Args ParseArgs(const char* argsJson) {
     };
     out.active = get("active");
     g_verbose = get("logging") == "verbose";
-    g_logDir = Widen(get("log_dir"));
     return out;
 }
 
@@ -573,12 +553,8 @@ bool g_installed = false;
 
 int Install(const char* argsJson) {
     if (g_installed) return 0;  // already through the other entry point
-    FILETIME created, exited, kernel, user;
-    if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
-        g_start = ((static_cast<ULONGLONG>(created.dwHighDateTime) << 32) | created.dwLowDateTime) / 10000;
     Args args = ParseArgs(argsJson);
-    OpenLog();
-    Log("NvrContentOverlay 1.1.0, %s", args.active.empty() ? "no active pack" : args.active.c_str());
+    PluginLog("NvrContentOverlay 1.2.0, %s", args.active.empty() ? "no active pack" : args.active.c_str());
 
     const bool live = ExeTimestamp() == kLiveBuild;
     uint8_t* load = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)) + kLoadModuleRva;
@@ -587,30 +563,30 @@ int Install(const char* argsJson) {
 
     if (!args.active.empty()) {
         if (!LoadPack(args.active)) {
-            Log("the game runs without the pack");
+            PluginLogWarning("the game runs without the pack");
             return 1;
         }
         if (DataAlreadyOpen()) {
-            Log("loaded too late: the game has opened its data already. List this plugin with "
+            PluginLogWarning("loaded too late: the game has opened its data already. List this plugin with "
                 "`early: true` in config.yaml (nEVR with the early load pass). The game runs without the pack");
             g_files.clear();
             g_scripts.clear();
             return 1;
         }
         if (!g_scripts.empty() && !loaderOk) {
-            Log("the pack has scripts, but this isn't the build its script loader is known for (%s): the game "
+            PluginLogWarning("the pack has scripts, but this isn't the build its script loader is known for (%s): the game "
                 "runs without the pack",
                 live ? "loader changed" : "not echovr.exe 631547");
             return 1;
         }
     } else if (!g_verbose) {
-        Log("nothing to do");
+        PluginLog("nothing to do");
         return 0;
     }
 
     MH_STATUS s = MH_Initialize();
     if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
-        Log("ERROR: MH_Initialize: %s", MH_StatusToString(s));
+        PluginLogWarning("MH_Initialize: %s", MH_StatusToString(s));
         return 1;
     }
     g_active = !args.active.empty();
@@ -626,11 +602,11 @@ int Install(const char* argsJson) {
     if (!ok) {
         g_active = false;
         Unhook();
-        Log("the game runs without the pack");
+        PluginLogWarning("the game runs without the pack");
         return 1;
     }
     g_installed = true;
-    Log(g_active ? "serving the pack" : "logging only (verbose, no pack)");
+    PluginLog(g_active ? "serving the pack" : "logging only (verbose, no pack)");
     return 0;
 }
 
@@ -643,7 +619,7 @@ NvrPluginInfo NvrPluginGetInfo(void) {
     info.name = "content_overlay";
     info.description = "Serves a content pack's game data in place of the stock files";
     info.version_major = 1;
-    info.version_minor = 1;
+    info.version_minor = 2;
     info.version_patch = 0;
     return info;
 }
@@ -654,19 +630,20 @@ uint32_t NvrPluginGetCapabilities(void) {
     return NEVR_PLUGIN_CAP_ALTERS_GAMEPLAY | NEVR_PLUGIN_CAP_HOOKS_ENGINE;
 }
 
-int NvrPluginInitEx(const NvrGameContext*, const char* args) { return Install(args); }
+int NvrPluginInitEx(const NvrGameContext* ctx, const char* args) {
+    PluginLogBind(ctx);
+    return Install(args);
+}
 
-int NvrPluginInit(const NvrGameContext*) { return Install(nullptr); }
+int NvrPluginInit(const NvrGameContext* ctx) {
+    PluginLogBind(ctx);
+    return Install(nullptr);
+}
 
 void NvrPluginShutdown(void) {
     g_active = false;
     Unhook();
-    Log("shut down (%ld file opens and %ld scripts served from the pack)", g_fileHits, g_scriptHits);
-    std::lock_guard<std::mutex> lock(g_logLock);
-    if (g_log) {
-        fclose(g_log);
-        g_log = nullptr;
-    }
+    PluginLog("shut down (%ld file opens and %ld scripts served from the pack)", g_fileHits, g_scriptHits);
 }
 
 }  // extern "C"
